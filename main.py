@@ -6,7 +6,7 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # Logging setup
@@ -24,61 +24,50 @@ PAIRS = {
     "BTCUSD": "BTC-USD"
 }
 
-# In-memory storage for settings & stats
-USER_SETTINGS = {}
 PERFORMANCE_STATS = {"total": 0, "wins": 0, "losses": 0, "no_trades": 0}
 
 # ==========================================
-# TECHNICAL ANALYSIS ENGINE (Phases 2 & 5)
+# TECHNICAL ANALYSIS ENGINE
 # ==========================================
 
 def calculate_indicators(df):
-    """Calculates EMA, RSI, MACD, Bollinger Bands, and Support/Resistance."""
-    # EMA
     df['EMA9'] = df['Close'].ewm(span=9, adjust=False).mean()
     df['EMA21'] = df['Close'].ewm(span=21, adjust=False).mean()
     
-    # RSI (14)
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # MACD
     ema12 = df['Close'].ewm(span=12, adjust=False).mean()
     ema26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = ema12 - ema26
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     
-    # Bollinger Bands
     df['SMA20'] = df['Close'].rolling(window=20).mean()
     df['STD20'] = df['Close'].rolling(window=20).std()
     df['BB_Upper'] = df['SMA20'] + (df['STD20'] * 2)
     df['BB_Lower'] = df['SMA20'] - (df['STD20'] * 2)
     
-    # Support & Resistance (20-period Min/Max)
     df['Support'] = df['Low'].rolling(window=20).min()
     df['Resistance'] = df['High'].rolling(window=20).max()
     
     return df
 
 def generate_signal(pair_symbol):
-    """Fetch data, compute strategy rules, and produce a confidence score."""
     try:
         data = yf.download(tickers=pair_symbol, period="1d", interval="1m", progress=False)
         if len(data) < 35:
-            return {"direction": "NO TRADE", "confidence": 0, "reason": "Insufficient market data"}
+            return {"direction": "NO TRADE", "confidence": 0, "reasons": ["Insufficient market data"]}
         
         df = calculate_indicators(data.copy())
         latest = df.iloc[-1]
-        prev = df.iloc[-2]
 
         score_call = 0
         score_put = 0
         reasons = []
 
-        # 1. EMA Trend Check
         if latest['EMA9'] > latest['EMA21']:
             score_call += 25
             reasons.append("✅ Short-term trend bullish (EMA 9 > 21)")
@@ -86,7 +75,6 @@ def generate_signal(pair_symbol):
             score_put += 25
             reasons.append("🔻 Short-term trend bearish (EMA 9 < 21)")
 
-        # 2. RSI Momentum
         if latest['RSI'] < 30:
             score_call += 25
             reasons.append("✅ Oversold condition detected (RSI < 30)")
@@ -100,7 +88,6 @@ def generate_signal(pair_symbol):
             score_put += 15
             reasons.append("🔻 Bearish RSI momentum")
 
-        # 3. MACD Crossover
         if latest['MACD'] > latest['MACD_Signal']:
             score_call += 25
             reasons.append("✅ MACD bullish crossover")
@@ -108,7 +95,6 @@ def generate_signal(pair_symbol):
             score_put += 25
             reasons.append("🔻 MACD bearish crossover")
 
-        # 4. Bollinger Bands & Support/Resistance
         if latest['Close'] <= latest['BB_Lower'] or abs(latest['Close'] - latest['Support']) < 0.0002:
             score_call += 25
             reasons.append("✅ Rebound from Support / BB Lower Band")
@@ -116,7 +102,6 @@ def generate_signal(pair_symbol):
             score_put += 25
             reasons.append("🔻 Rejection from Resistance / BB Upper Band")
 
-        # Determine Final Direction
         if score_call >= 75 and score_call > score_put:
             direction = "CALL"
             confidence = score_call
@@ -140,7 +125,7 @@ def generate_signal(pair_symbol):
         return {"direction": "NO TRADE", "confidence": 0, "reasons": ["Data download error"]}
 
 # ==========================================
-# TELEGRAM BOT COMMAND HANDLERS (Phase 1)
+# TELEGRAM BOT COMMAND HANDLERS
 # ==========================================
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -196,7 +181,6 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 
 async def signals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Executes live analysis on EUR/USD and returns the formatted signal."""
     await update.message.reply_text("🔄 *Analyzing 1-minute price action & technical indicators...*", parse_mode="Markdown")
     
     asset = "EURUSD"
@@ -219,7 +203,6 @@ async def signals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         PERFORMANCE_STATS["total"] += 1
-        # Simulating random performance output for historical metrics
         PERFORMANCE_STATS["wins"] += 1
         
         msg = (
@@ -239,7 +222,7 @@ async def signals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 # ==========================================
-# APPLICATION LAUNCHER
+# APPLICATION LAUNCHER WITH PROXY SUPPORT
 # ==========================================
 
 def main():
@@ -247,7 +230,16 @@ def main():
         print("ERROR: Please set your TELEGRAM_TOKEN environment variable.")
         return
 
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    # PythonAnywhere Free Account Proxy Configuration
+    proxy_url = "http://proxy.server:3128"
+    
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_BOT_TOKEN)
+        .proxy(proxy_url)
+        .get_updates_proxy(proxy_url)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
