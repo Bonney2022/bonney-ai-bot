@@ -16,27 +16,27 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
 PAIRS = {
-    "EURUSD": "EURUSD=X",
-    "GBPUSD": "GBPUSD=X",
-    "USDJPY": "JPY=X",
-    "AUDUSD": "AUDUSD=X",
-    "USDCAD": "CAD=X",
-    "USDCHF": "CHF=X",
-    "NZDUSD": "NZDUSD=X",
-    "GOLD": "GC=F",      # Gold Futures
-    "SILVER": "SI=F",    # Silver Futures
-    "BTCUSD": "BTC-USD"
+    "EUR/USD": "EURUSD=X",
+    "GBP/USD": "GBPUSD=X",
+    "USD/JPY": "JPY=X",
+    "AUD/USD": "AUDUSD=X",
+    "USD/CAD": "CAD=X",
+    "USD/CHF": "CHF=X",
+    "NZD/USD": "NZDUSD=X",
+    "XAU/USD (GOLD)": "GC=F",
+    "XAG/USD (SILVER)": "SI=F",
+    "BTC/USD": "BTC-USD"
 }
 
 PERFORMANCE_STATS = {"total": 0, "wins": 0, "losses": 0, "no_trades": 0}
 ACTIVE_SUBSCRIBERS = set()
 
 # ==========================================
-# TECHNICAL ANALYSIS ENGINE (5-Min Candle Analysis)
+# TECHNICAL ANALYSIS ENGINE (5-Min Expiry)
 # ==========================================
 
 def calculate_indicators(df):
-    """Calculates technical indicators on 5-minute candle data."""
+    """Calculates indicators on 5-minute candle data."""
     df['EMA9'] = df['Close'].ewm(span=9, adjust=False).mean()
     df['EMA21'] = df['Close'].ewm(span=21, adjust=False).mean()
     
@@ -63,10 +63,9 @@ def calculate_indicators(df):
 
 def generate_signal(pair_symbol):
     try:
-        # Fetches 5-minute candle data for higher quality trend analysis
         data = yf.download(tickers=pair_symbol, period="5d", interval="5m", progress=False)
         if len(data) < 35:
-            return {"direction": "NO TRADE", "confidence": 0, "reasons": ["Insufficient 5-minute candle data"]}
+            return {"direction": "NO TRADE", "confidence": 0, "reasons": ["Insufficient data"]}
         
         df = calculate_indicators(data.copy())
         latest = df.iloc[-1]
@@ -75,49 +74,41 @@ def generate_signal(pair_symbol):
         score_put = 0
         reasons = []
 
-        # 1. 5-Min EMA Trend Check (28 Points)
+        # 1. EMA Trend Check (35 Points)
         if latest['EMA9'] > latest['EMA21']:
-            score_call += 28
-            reasons.append("✅ 5M EMA Trend: Bullish (EMA 9 > 21)")
+            score_call += 35
+            reasons.append("✅ 5M EMA Trend: Bullish (9 > 21)")
         else:
-            score_put += 28
-            reasons.append("🔻 5M EMA Trend: Bearish (EMA 9 < 21)")
+            score_put += 35
+            reasons.append("🔻 5M EMA Trend: Bearish (9 < 21)")
 
-        # 2. 5-Min RSI Momentum (27 Points)
-        if latest['RSI'] > 50:
-            score_call += 27
+        # 2. RSI Momentum (35 Points)
+        if latest['RSI'] >= 50:
+            score_call += 35
             reasons.append(f"✅ 5M RSI ({latest['RSI']:.1f}): Bullish momentum")
         else:
-            score_put += 27
+            score_put += 35
             reasons.append(f"🔻 5M RSI ({latest['RSI']:.1f}): Bearish momentum")
 
-        # 3. 5-Min MACD Crossover (25 Points)
+        # 3. MACD Crossover (30 Points)
         if latest['MACD'] > latest['MACD_Signal']:
-            score_call += 25
-            reasons.append("✅ 5M MACD: Bullish crossover")
+            score_call += 30
+            reasons.append("✅ 5M MACD: Bullish signal")
         else:
-            score_put += 25
-            reasons.append("🔻 5M MACD: Bearish crossover")
+            score_put += 30
+            reasons.append("🔻 5M MACD: Bearish signal")
 
-        # 4. 5-Min Support/Resistance & Bollinger Bands (20 Points)
-        if latest['Close'] <= latest['BB_Lower'] or abs(latest['Close'] - latest['Support']) < 0.0005:
-            score_call += 20
-            reasons.append("✅ Price at 5M Support / Lower BB")
-        elif latest['Close'] >= latest['BB_Upper'] or abs(latest['Resistance'] - latest['Close']) < 0.0005:
-            score_put += 20
-            reasons.append("🔻 Price at 5M Resistance / Upper BB")
-
-        # Threshold: 3 Agreeing Indicators = 80%+ Confidence
-        if score_call >= 75 and score_call > score_put:
+        # Decision Threshold: >= 65% Confidence triggers a trade
+        if score_call >= 65 and score_call > score_put:
             direction = "CALL"
             confidence = score_call
-        elif score_put >= 75 and score_put > score_call:
+        elif score_put >= 65 and score_put > score_call:
             direction = "PUT"
             confidence = score_put
         else:
             direction = "NO TRADE"
             confidence = max(score_call, score_put)
-            reasons.append("⚠️ Less than 3 indicators agree on 5M timeframe")
+            reasons.append("⚠️ Conflicting technical indicators")
 
         return {
             "direction": direction,
@@ -131,12 +122,15 @@ def generate_signal(pair_symbol):
         return {"direction": "NO TRADE", "confidence": 0, "reasons": ["Data fetch error"]}
 
 def scan_all_pairs():
-    """Scans all pairs using 5-minute candle metrics."""
+    """Scans all assets and builds detailed pair breakdown."""
+    all_results = []
     best_signal = None
     best_asset = None
 
     for asset_name, symbol in PAIRS.items():
         sig = generate_signal(symbol)
+        all_results.append((asset_name, sig))
+        
         if sig["direction"] != "NO TRADE":
             if best_signal is None or sig["confidence"] > best_signal["confidence"]:
                 best_signal = sig
@@ -144,16 +138,20 @@ def scan_all_pairs():
 
     now = datetime.utcnow()
     entry_time_str = now.strftime("%H:%M:%S")
-    expiry_time_str = (now + timedelta(minutes=2)).strftime("%H:%M:%S")
+    expiry_time_str = (now + timedelta(minutes=5)).strftime("%H:%M:%S")
 
     if best_signal is None:
         PERFORMANCE_STATS["no_trades"] += 1
+        # Build pair summary list so specific pair names are always shown
+        pair_summaries = "\n".join([f"• *{name}*: {s['direction']} ({s['confidence']}%)" for name, s in all_results[:5]])
+        
         msg = (
             "⚡ *BONNEY AI AUTOMATED SIGNAL*\n\n"
             "Direction: 🚫 *NO TRADE*\n"
             f"🕒 Scan Time: `{entry_time_str} UTC`\n"
-            "Status: *Conflicting 5-minute trends across assets*\n\n"
-            "⚠️ *Recommendation:* Indicators are tied. Skipping cycle."
+            "Status: *Market unclear across pairs*\n\n"
+            f"*Tracked Asset Statuses:*\n{pair_summaries}\n\n"
+            "⚠️ *Recommendation:* Waiting for clearer 5-minute candle setups."
         )
     else:
         PERFORMANCE_STATS["total"] += 1
@@ -165,14 +163,13 @@ def scan_all_pairs():
             "━━━━━━━━━━━━━━━━━\n"
             f"📍 Asset: *{best_asset} (OTC)*\n"
             f"🎯 Signal: *{best_signal['direction']}*\n"
-            f"📊 Analysis Window: *5-Minute Candle*\n"
             f"🕒 Entry Time: `{entry_time_str} UTC`\n"
-            f"⏱ Trade Expiry: `{expiry_time_str} UTC` (2 Mins)\n"
+            f"⏱ Expiry Time: `{expiry_time_str} UTC` (5 Mins)\n"
             f"🔥 Confidence: `{best_signal['confidence']}%`\n"
-            f"🟢 Status: *Strong 5M Confluence*\n"
+            f"🟢 Status: *Confirmed 5M Setup*\n"
             "━━━━━━━━━━━━━━━━━\n"
             f"*Analysis Details:*\n{reasons_formatted}\n\n"
-            "⚠️ *Action Required:* Execute 2-minute trade immediately on Pocket Option."
+            "⚠️ *Action Required:* Execute 5-minute trade on Pocket Option at entry timestamp."
         )
     return msg
 
@@ -182,7 +179,7 @@ def scan_all_pairs():
 
 async def auto_signal_loop(app):
     while True:
-        await asyncio.sleep(300)  # Every 5 minutes
+        await asyncio.sleep(300)  # Runs every 5 minutes
         if ACTIVE_SUBSCRIBERS:
             signal_msg = scan_all_pairs()
             for chat_id in list(ACTIVE_SUBSCRIBERS):
@@ -200,8 +197,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ACTIVE_SUBSCRIBERS.add(chat_id)
     welcome_text = (
         "⚡ *WELCOME TO BONNEY AI SIGNAL BOT*\n\n"
-        "Your automated assistant for Pocket Option 2-Minute Expiry Trades.\n\n"
-        "🟢 *Auto-alerts ENABLED:* Receiving 5-minute candle signals every 5 minutes.\n\n"
+        "Your automated assistant for Pocket Option 5-Minute Expiry Trades.\n\n"
+        "🟢 *Auto-alerts ENABLED:* Receiving 5-minute signals every 5 minutes.\n\n"
         "*Available Commands:*\n"
         "• `/start_alerts` - Turn ON 5-minute automated signals\n"
         "• `/stop_alerts` - Turn OFF 5-minute automated signals\n"
@@ -228,8 +225,8 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🟢 *SYSTEM STATUS: ONLINE*\n"
         "• Market Engine: Active\n"
         "• Candle Timeframe: 5 Minutes\n"
-        "• Trade Expiry: 2 Minutes\n"
-        "• Filter Threshold: 3 Indicators Agreement (75%+)\n"
+        "• Trade Expiry: 5 Minutes\n"
+        "• Filter Threshold: >= 65% Confidence\n"
         "• Server Time: " + datetime.utcnow().strftime("%H:%M:%S UTC")
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
@@ -257,9 +254,9 @@ async def settings_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "⚙️ *BONNEY AI CONFIGURATION*\n\n"
         "• Chart Candle: 5-Minute Timeframe\n"
-        "• Strategy: EMA(9,21) + RSI(14) + MACD + BB + S/R\n"
-        "• Expiry Window: 2 Minutes\n"
-        "• Minimum Agreement: 3 Indicators (75%+ Confidence)\n"
+        "• Strategy: EMA(9,21) + RSI(14) + MACD\n"
+        "• Expiry Window: 5 Minutes\n"
+        "• Signal Threshold: >= 65% Confidence\n"
         "• Broadcast Interval: 5 Minutes"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
