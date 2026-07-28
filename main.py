@@ -38,10 +38,10 @@ ACTIVE_SUBSCRIBERS = set()
 # ==========================================
 
 def calculate_supertrend(df, period=10, multiplier=3):
-    """Calculates Supertrend Indicator."""
-    high = df['High']
-    low = df['Low']
-    close = df['Close']
+    """Calculates Supertrend Indicator cleanly across Series."""
+    high = df['High'].squeeze()
+    low = df['Low'].squeeze()
+    close = df['Close'].squeeze()
     
     tr1 = high - low
     tr2 = (high - close.shift(1)).abs()
@@ -57,17 +57,24 @@ def calculate_supertrend(df, period=10, multiplier=3):
     direction = pd.Series(index=df.index, dtype='int64')
     
     for i in range(period, len(df)):
-        if close.iloc[i] > final_upperband.iloc[i-1]:
-            direction.iloc[i] = 1
-        elif close.iloc[i] < final_lowerband.iloc[i-1]:
-            direction.iloc[i] = -1
-        else:
-            direction.iloc[i] = direction.iloc[i-1] if i > period else 1
+        c_val = float(close.iloc[i])
+        u_val = float(final_upperband.iloc[i-1])
+        l_val = float(final_lowerband.iloc[i-1])
+        prev_dir = int(direction.iloc[i-1]) if i > period else 1
 
-        if direction.iloc[i] == 1:
-            supertrend.iloc[i] = final_lowerband.iloc[i]
+        if c_val > u_val:
+            dir_val = 1
+        elif c_val < l_val:
+            dir_val = -1
         else:
-            supertrend.iloc[i] = final_upperband.iloc[i]
+            dir_val = prev_dir
+
+        direction.iloc[i] = dir_val
+
+        if dir_val == 1:
+            supertrend.iloc[i] = float(final_lowerband.iloc[i])
+        else:
+            supertrend.iloc[i] = float(final_upperband.iloc[i])
             
     df['Supertrend'] = supertrend
     df['Supertrend_Dir'] = direction
@@ -75,14 +82,18 @@ def calculate_supertrend(df, period=10, multiplier=3):
 
 def calculate_indicators(df):
     """Calculates Stochastic (5,3,3), RSI (14), and Supertrend."""
+    close = df['Close'].squeeze()
+    low = df['Low'].squeeze()
+    high = df['High'].squeeze()
+
     # 1. Stochastic Oscillator (5, 3, 3)
-    low_min = df['Low'].rolling(window=5).min()
-    high_max = df['High'].rolling(window=5).max()
-    df['Stoch_K'] = 100 * ((df['Close'] - low_min) / (high_max - low_min))
+    low_min = low.rolling(window=5).min()
+    high_max = high.rolling(window=5).max()
+    df['Stoch_K'] = 100 * ((close - low_min) / (high_max - low_min))
     df['Stoch_D'] = df['Stoch_K'].rolling(window=3).mean()
     
     # 2. RSI (14)
-    delta = df['Close'].diff()
+    delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
@@ -99,6 +110,10 @@ def generate_signal(pair_symbol):
         if len(data) < 25:
             return {"direction": "NO TRADE", "confidence": 0, "reasons": ["Insufficient data"]}
         
+        # FIX: Flatten MultiIndex columns returned by newer yfinance versions
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+
         df = calculate_indicators(data.copy())
         latest = df.iloc[-1]
 
@@ -107,16 +122,17 @@ def generate_signal(pair_symbol):
         reasons = []
 
         # 1. Supertrend Direction (35 Points)
-        if latest['Supertrend_Dir'] == 1:
+        st_dir = int(latest['Supertrend_Dir'])
+        if st_dir == 1:
             score_call += 35
             reasons.append("✅ Supertrend: Bullish (Green)")
-        elif latest['Supertrend_Dir'] == -1:
+        elif st_dir == -1:
             score_put += 35
             reasons.append("🔻 Supertrend: Bearish (Red)")
 
         # 2. Stochastic Oscillator (5, 3, 3) (35 Points)
-        stoch_k = float(latest['Stoch_K'].item())
-        stoch_d = float(latest['Stoch_D'].item())
+        stoch_k = float(latest['Stoch_K'])
+        stoch_d = float(latest['Stoch_D'])
         if stoch_k > stoch_d and stoch_k < 80:
             score_call += 35
             reasons.append(f"✅ Stochastic (5,3,3): Bullish Crossover (%K={stoch_k:.1f})")
@@ -125,7 +141,7 @@ def generate_signal(pair_symbol):
             reasons.append(f"🔻 Stochastic (5,3,3): Bearish Crossover (%K={stoch_k:.1f})")
 
         # 3. RSI (14) Momentum (30 Points)
-        rsi_val = float(latest['RSI'].item())
+        rsi_val = float(latest['RSI'])
         if rsi_val >= 50:
             score_call += 30
             reasons.append(f"✅ RSI (14): Bullish Momentum ({rsi_val:.1f})")
@@ -149,12 +165,12 @@ def generate_signal(pair_symbol):
             "direction": direction,
             "confidence": confidence,
             "reasons": reasons,
-            "price": round(float(latest['Close'].item()), 5)
+            "price": round(float(latest['Close']), 5)
         }
 
     except Exception as e:
         logging.error(f"Error evaluating {pair_symbol}: {e}")
-        return {"direction": "NO TRADE", "confidence": 0, "reasons": ["Data fetch error"]}
+        return {"direction": "NO TRADE", "confidence": 0, "reasons": [f"Error: {e}"]}
 
 def scan_all_pairs():
     """Scans all pairs and calculates entry at the NEXT exact minute."""
@@ -168,14 +184,12 @@ def scan_all_pairs():
                 best_signal = sig
                 best_asset = asset_name
 
-    # If no 70%+ trade setup is found, return None (DO NOT SEND TELEGRAM ALERT)
     if best_signal is None:
         PERFORMANCE_STATS["no_trades"] += 1
         return None
 
     now_local = datetime.now(LOCAL_TZ)
     
-    # Calculate exact entry time at the next 1-minute mark (:00 seconds)
     entry_local = (now_local + timedelta(minutes=1)).replace(second=0, microsecond=0)
     expiry_local = entry_local + timedelta(minutes=5)
     
@@ -208,7 +222,7 @@ def scan_all_pairs():
 
 async def auto_signal_loop(app):
     while True:
-        await asyncio.sleep(30)  # Scans every 30 seconds
+        await asyncio.sleep(30)
         if ACTIVE_SUBSCRIBERS:
             signal_msg = scan_all_pairs()
             if signal_msg is not None:
@@ -300,7 +314,7 @@ async def signals_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode="Markdown")
 
 # ==========================================
-# APPLICATION LAUNCHER (With PythonAnywhere Proxy)
+# APPLICATION LAUNCHER
 # ==========================================
 
 async def post_init(app):
@@ -311,7 +325,6 @@ def main():
         print("ERROR: Please set your TELEGRAM_TOKEN environment variable.")
         return
 
-    # MANDATORY PROXY FOR PYTHONANYWHERE FREE ACCOUNTS
     proxy_url = "http://proxy.server:3128"
     
     app = (
@@ -337,4 +350,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-      
