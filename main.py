@@ -18,8 +18,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN_HERE")
 LOCAL_TZ = ZoneInfo("America/Toronto")  # Eastern Time
 
 # Direct Pocket Option Session ID
-SSID = '42["auth",{"sessionToken":"5a7323ef8734bd71e48067c789845cf2","uid":"93728316","lang":"en","currentUrl":"cabinet","isChart":1}]'
-
+SSID = '42["auth",{"session":"ba3a0ed3bba8c60a411b1ab8ce6a4bbe","isDemo":1,"uid":93728316,"platform":1}]'
 # Pocket Option OTC & Live Asset Symbols
 PAIRS = {
     "EUR/USD OTC": "EURUSD_otc",
